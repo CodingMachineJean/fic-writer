@@ -456,7 +456,7 @@ wa.addEventListener('paste', e => {
 // Replace YOUR_SAPLING_API_KEY with a free key from https://sapling.ai/user/settings
 // Free tier: 50,000 characters/day, no credit card needed
 // ═══════════════════════════
-const SAPLING_API_KEY = 'Ha5zJ6BUu9K9zMlaTux4mNZIXJzoIPlRczq50oQ2KELo6yQvi7_LuDLf1ED1KaeitKqcV0XLNH5XyuZG5dSPyA%3D%3D';
+const SAPLING_API_KEY = 'Ha5zJ6BUu9K9zMlaTux4mNZIXJzoIPlRczq50oQ2KELo6yQvi7_LuDLf1ED1KaeitKqcV0XLNH5XyuZG5dSPyA==';
 
 let grammarT = null;
 let grammarMarks = [];    // [{from, to, message, replacements}]
@@ -538,7 +538,7 @@ function applyGrammarMarks(plainText, matches) {
     for (const m of sortedMatches) {
         const from = m.offset;
         const to = from + m.length;
-        const replacements = (m.replacements || []).slice(0, 5).map(r => r.value);
+        const replacements = (m.replacements || []).slice(0, 5);
         const message = m.message || '';
 
         wrapRangeWithSpan(from, to, { message, replacements });
