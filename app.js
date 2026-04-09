@@ -452,8 +452,12 @@ wa.addEventListener('paste', e => {
 });
 
 // ═══════════════════════════
-// GRAMMAR CHECK (LanguageTool)
+// GRAMMAR CHECK (Sapling AI)
+// Replace YOUR_SAPLING_API_KEY with a free key from https://sapling.ai/user/settings
+// Free tier: 50,000 characters/day, no credit card needed
 // ═══════════════════════════
+const SAPLING_API_KEY = '5SALXIEOB7XHNCZ6C1GIE3P4ZTH8GCFZ%3D%3D';
+
 let grammarT = null;
 let grammarMarks = [];    // [{from, to, message, replacements}]
 let activePopover = null;
@@ -472,33 +476,26 @@ async function runGrammarCheck() {
 
     grammarInFlight = true;
     try {
-        const res = await fetch('https://api.languagetool.org/v2/check', {
+        const res = await fetch('https://api.sapling.ai/api/v1/edits', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                key: SAPLING_API_KEY,
                 text,
-                language: 'en-US',
-                disabledCategories: 'TYPOGRAPHY',
-                disabledRules: 'WHITESPACE_RULE,EN_UNPAIRED_BRACKETS',
-                enabledOnly: 'false',
-                level: 'default'
+                session_id: 'fw3-editor',
+                neural_spellcheck: true
             })
         });
         if (!res.ok) return;
         const data = await res.json();
-        // Filter out low-confidence matches: keep only SPELLING and clear grammar errors
-        const filtered = (data.matches || []).filter(m => {
-            const cat = (m.rule && m.rule.category && m.rule.category.id) || '';
-            // Always keep spelling errors
-            if (cat === 'TYPOS' || cat === 'SPELLING') return true;
-            // Keep grammar errors that have at least one replacement
-            if (cat === 'GRAMMAR' && m.replacements && m.replacements.length > 0) return true;
-            // Drop style, punctuation, misc low-confidence
-            if (['STYLE', 'PUNCTUATION', 'TYPOGRAPHY', 'MISC', 'CASING'].includes(cat)) return false;
-            // Keep anything else that has a clear replacement
-            return m.replacements && m.replacements.length > 0;
-        });
-        applyGrammarMarks(text, filtered);
+        // Sapling returns: { edits: [{start, end, replacement, error_type, ...}] }
+        const matches = (data.edits || []).map(e => ({
+            offset: e.start,
+            length: e.end - e.start,
+            message: e.error_type || 'Suggestion',
+            replacements: e.replacement ? [e.replacement] : []
+        })).filter(m => m.replacements.length > 0);
+        applyGrammarMarks(text, matches);
     } catch (e) {
         // silently fail — no internet, rate limit, etc.
     } finally {
@@ -509,7 +506,6 @@ async function runGrammarCheck() {
         }
     }
 }
-
 function clearGrammarMarks() {
     grammarMarks = [];
     closePopover();
