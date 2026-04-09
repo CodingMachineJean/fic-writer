@@ -452,242 +452,14 @@ wa.addEventListener('paste', e => {
 });
 
 // ═══════════════════════════
-// GRAMMAR CHECK (Sapling AI)
-// Replace YOUR_SAPLING_API_KEY with a free key from https://sapling.ai/user/settings
-// Free tier: 50,000 characters/day, no credit card needed
+// SPELL CHECK — native browser (spellcheck attr on write-area)
+// Grammar/clarity/rhythm → AI panel (Check Scene button)
 // ═══════════════════════════
-// ═══════════════════════════
-// SPELL CHECK (Typo.js — roda no browser, sem API)
-// ═══════════════════════════
-let typoDic = null;
+function scheduleGrammarCheck() { /* no-op: using native spellcheck */ }
+function clearGrammarMarks() { /* no-op */ }
+function closePopover() { /* no-op */ }
 
-async function loadTypo() {
-    if (typoDic) return typoDic;
-    const base = '/dictionaries/en_US';
-    const [aff, dic] = await Promise.all([
-        fetch(base + '.aff').then(r => r.text()),
-        fetch(base + '.dic').then(r => r.text())
-    ]);
-    typoDic = new Typo('en_US', aff, dic);
-    return typoDic;
-}
-
-loadTypo().catch(e => console.error('Typo load error:', e));
-
-let grammarT = null;
-let grammarMarks = [];
-let activePopover = null;
-let grammarInFlight = false;
-let grammarPending = false;
-
-function scheduleGrammarCheck() {
-    clearTimeout(grammarT);
-    grammarT = setTimeout(runGrammarCheck, 800);
-}
-
-async function runGrammarCheck() {
-    if (grammarInFlight) { grammarPending = true; return; }
-    const text = getPlainText();
-    if (!text.trim() || text.trim().length < 2) { clearGrammarMarks(); return; }
-
-    grammarInFlight = true;
-    try {
-        const dic = await loadTypo();
-        // tokeniza palavras com seus offsets
-        const matches = [];
-        const wordRe = /[a-zA-Z']+/g;
-        let m;
-        while ((m = wordRe.exec(text)) !== null) {
-            const word = m[0].replace(/^'+|'+$/g, ''); // remove aspas nas bordas
-            if (word.length < 2) continue;
-            if (!dic.check(word)) {
-                const suggestions = dic.suggest(word).slice(0, 5);
-                if (suggestions.length > 0) {
-                    matches.push({
-                        offset: m.index,
-                        length: m[0].length,
-                        message: 'Misspelled: ' + word,
-                        replacements: suggestions
-                    });
-                }
-            }
-        }
-        applyGrammarMarks(text, matches);
-    } catch (e) {
-        console.error('SpellCheck error:', e);
-    }
-}
-function clearGrammarMarks() {
-    grammarMarks = [];
-    closePopover();
-    // Unwrap all grammar spans without disturbing text
-    wa.querySelectorAll('.gr-err').forEach(span => {
-        const parent = span.parentNode;
-        while (span.firstChild) parent.insertBefore(span.firstChild, span);
-        parent.removeChild(span);
-    });
-    // Normalize text nodes
-    wa.normalize();
-}
-
-function applyGrammarMarks(plainText, matches) {
-    // Re-check that text hasn't changed since the async call.
-    // Compare using getPlainText() — same function that built plainText.
-    if (getPlainText() !== plainText) return;
-
-    clearGrammarMarks();
-    if (matches.length === 0) return;
-
-    // Save caret
-    const caretOff = getCaretOffset();
-
-    // We need to find text nodes and inject spans at character offsets.
-    // Strategy: collect all text nodes with cumulative offsets, then
-    // process matches from last to first (so earlier offsets stay valid).
-    const sortedMatches = [...matches].sort((a, b) => b.offset - a.offset);
-
-    for (const m of sortedMatches) {
-        const from = m.offset;
-        const to = from + m.length;
-        const replacements = (m.replacements || []).slice(0, 5);
-        const message = m.message || '';
-
-        wrapRangeWithSpan(from, to, { message, replacements });
-    }
-
-    grammarMarks = matches;
-
-    // Restore caret
-    try { setCaretOffset(caretOff); } catch (e) { }
-}
-
-// Wrap character range [from, to) in the editor with a <span class="gr-err">
-// Uses domWalk — same as getPlainText — so offsets are guaranteed to match.
-function wrapRangeWithSpan(from, to, data) {
-    // Build segments: each text node mapped to its [start, end) char range.
-    // Synthetic newlines (from blocks/BR) advance pos but have no DOM node.
-    const segments = [];  // { node: TextNode, start, end }
-    let pos = 0;
-
-    domWalk(wa, (type, node) => {
-        if (type === 'text') {
-            const len = node.textContent.length;
-            segments.push({ node, start: pos, end: pos + len });
-            pos += len;
-        } else {
-            pos += 1;  // synthetic \n
-        }
-    });
-
-    let startNode = null, startOff = 0, endNode = null, endOff = 0;
-
-    for (const seg of segments) {
-        if (!startNode && seg.end > from) {
-            startNode = seg.node;
-            startOff = from - seg.start;
-        }
-        if (!endNode && seg.end >= to) {
-            endNode = seg.node;
-            endOff = to - seg.start;
-        }
-        if (startNode && endNode) break;
-    }
-
-    if (!startNode || !endNode) return;
-
-    // If the match spans a block boundary, clip to the start node's block end.
-    if (startNode !== endNode) {
-        endNode = startNode;
-        endOff = startNode.textContent.length;
-    }
-
-    try {
-        const range = document.createRange();
-        range.setStart(startNode, Math.max(0, startOff));
-        range.setEnd(endNode, Math.min(endOff, endNode.textContent.length));
-        if (range.collapsed) return;
-        const span = document.createElement('span');
-        span.className = 'gr-err';
-        span.dataset.message = data.message;
-        span.dataset.replacements = JSON.stringify(data.replacements);
-        span.addEventListener('click', e => { e.stopPropagation(); openPopover(span, data); });
-        range.surroundContents(span);
-    } catch (e) {
-        // skip — range crossed a nested element boundary
-    }
-}
-
-// ── Popover ───────────────────────────────────────────────
-function openPopover(span, data) {
-    closePopover();
-    const pop = document.createElement('div');
-    pop.id = 'gr-popover';
-
-    const msg = document.createElement('div');
-    msg.className = 'gr-pop-msg';
-    msg.textContent = data.message;
-    pop.appendChild(msg);
-
-    if (data.replacements && data.replacements.length > 0) {
-        const pills = document.createElement('div');
-        pills.className = 'gr-pop-pills';
-        data.replacements.forEach(rep => {
-            const btn = document.createElement('button');
-            btn.className = 'gr-pop-pill';
-            btn.textContent = rep;
-            btn.addEventListener('click', () => {
-                applyCorrection(span, rep);
-                closePopover();
-            });
-            pills.appendChild(btn);
-        });
-        pop.appendChild(pills);
-    }
-
-    // Dismiss button
-    const dismiss = document.createElement('button');
-    dismiss.className = 'gr-pop-dismiss';
-    dismiss.textContent = 'Ignore';
-    dismiss.addEventListener('click', () => {
-        span.classList.add('gr-ignored');
-        closePopover();
-    });
-    pop.appendChild(dismiss);
-
-    document.body.appendChild(pop);
-    activePopover = pop;
-
-    // Position below the span
-    const rect = span.getBoundingClientRect();
-    const popW = 220;
-    let left = rect.left;
-    if (left + popW > window.innerWidth - 8) left = window.innerWidth - popW - 8;
-    pop.style.left = left + 'px';
-    pop.style.top = (rect.bottom + 6) + 'px';
-}
-
-function closePopover() {
-    if (activePopover) { activePopover.remove(); activePopover = null; }
-}
-
-document.addEventListener('click', e => {
-    if (activePopover && !activePopover.contains(e.target)) closePopover();
-});
-
-function applyCorrection(span, replacement) {
-    // Replace span with plain text node
-    const text = document.createTextNode(replacement);
-    span.parentNode.replaceChild(text, span);
-    wa.normalize();
-    // Update state
-    const plain = getPlainText();
-    if (S.chapters[S.activeCh]) {
-        S.chapters[S.activeCh].text = plain;
-        S.chapters[S.activeCh].status = 'writing';
-    }
-    undoPush(plain);
-    updateWC(); updateCounts(); save();
-}
+// (spell check popover removed — using native browser spellcheck)
 
 // ═══════════════════════════
 // TRASH
@@ -1229,6 +1001,224 @@ function renderPromisesOverlay() {
     el.style.display = 'block';
     el.innerHTML = lines.map(l => `<div class="po-line">${esc(l)}</div>`).join('');
 }
+
+// ═══════════════════════════
+// AI PANEL
+// ═══════════════════════════
+
+// Build AI panel HTML
+(function buildAIPanel() {
+    const panel = document.createElement('div');
+    panel.id = 'ai-panel';
+    panel.innerHTML = `
+        <div id="ai-panel-topbar">
+            <button id="ai-panel-close">×</button>
+            <div id="ai-panel-tabs">
+                <button class="ai-tab active" data-tab="chat">Chat</button>
+                <button class="ai-tab" data-tab="scene">Check Scene</button>
+            </div>
+        </div>
+        <div id="ai-tab-chat" class="ai-tab-content active">
+            <div id="ai-chat-log"></div>
+            <div id="ai-chat-input-row">
+                <textarea id="ai-chat-input" placeholder="Ask anything about your story…" rows="2"></textarea>
+                <button id="ai-chat-send">↑</button>
+            </div>
+        </div>
+        <div id="ai-tab-scene" class="ai-tab-content">
+            <div id="ai-scene-controls">
+                <button id="ai-check-scene-btn">Check current scene</button>
+                <div id="ai-scene-options">
+                    <label><input type="checkbox" id="sc-rhythm" checked> Rhythm</label>
+                    <label><input type="checkbox" id="sc-clarity" checked> Clarity</label>
+                    <label><input type="checkbox" id="sc-grammar" checked> Grammar</label>
+                    <label><input type="checkbox" id="sc-methods" checked> Methods</label>
+                </div>
+            </div>
+            <div id="ai-scene-result"></div>
+        </div>
+    `;
+    document.body.appendChild(panel);
+
+    // Floating button to open AI panel
+    const fab = document.createElement('button');
+    fab.id = 'ai-fab';
+    fab.title = 'AI Assistant';
+    fab.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
+    document.body.appendChild(fab);
+
+    fab.addEventListener('click', () => {
+        panel.classList.add('open');
+        fab.style.display = 'none';
+    });
+
+    document.getElementById('ai-panel-close').addEventListener('click', () => {
+        panel.classList.remove('open');
+        fab.style.display = '';
+    });
+
+    // Tab switching
+    panel.querySelectorAll('.ai-tab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            panel.querySelectorAll('.ai-tab').forEach(b => b.classList.remove('active'));
+            panel.querySelectorAll('.ai-tab-content').forEach(c => c.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById('ai-tab-' + btn.dataset.tab).classList.add('active');
+        });
+    });
+
+    // ── Helpers ──────────────────────────────────────────
+    function buildStoryContext() {
+        const activeMethods = S.aic.filter(r => r.on).map(r => r.text).join('\n');
+        const chars = S.characters.map(c => `${c.title}:\n${c.text}`).join('\n\n');
+        const timeline = S.timeline.map(t => `${t.title}:\n${t.text}`).join('\n\n');
+        const promises = (S.promises[0] && S.promises[0].text) ? S.promises[0].text : '';
+        const notes = S.notes.map(n => `${n.title}:\n${n.text}`).join('\n\n');
+        const chapterList = S.chapters.map((c, i) => `Chapter ${i + 1} — ${c.title} (${c.words} words)`).join('\n');
+
+        return `## ACTIVE METHODS (writing rules the author follows):\n${activeMethods || 'None set.'}\n\n## CHARACTERS:\n${chars || 'None.'}\n\n## TIMELINE:\n${timeline || 'None.'}\n\n## PROMISES:\n${promises || 'None.'}\n\n## NOTES:\n${notes || 'None.'}\n\n## CHAPTERS:\n${chapterList}`;
+    }
+
+    function getCurrentScene() {
+        const text = getPlainText();
+        const caret = getCaretOffset();
+        // Split by scene separator: line that is exactly "."
+        const sceneRe = /(?:^|\n)\.\n/g;
+        const boundaries = [];
+        let m;
+        while ((m = sceneRe.exec(text)) !== null) {
+            boundaries.push(m.index);
+        }
+        boundaries.push(text.length);
+
+        let sceneStart = 0;
+        for (const b of boundaries) {
+            if (b >= caret) break;
+            sceneStart = b;
+        }
+        // find end
+        let sceneEnd = text.length;
+        for (const b of boundaries) {
+            if (b > sceneStart) { sceneEnd = b; break; }
+        }
+
+        return text.slice(sceneStart, sceneEnd).trim() || text.trim();
+    }
+
+    async function callClaude(systemPrompt, userMessage) {
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 1000,
+                system: systemPrompt,
+                messages: [{ role: 'user', content: userMessage }]
+            })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        return data.content.map(b => b.text || '').join('');
+    }
+
+    // ── CHAT ─────────────────────────────────────────────
+    const chatLog = document.getElementById('ai-chat-log');
+    const chatInput = document.getElementById('ai-chat-input');
+    const chatSend = document.getElementById('ai-chat-send');
+    const chatHistory = [];
+
+    function appendMsg(role, text) {
+        const div = document.createElement('div');
+        div.className = 'ai-msg ai-msg-' + role;
+        div.textContent = text;
+        chatLog.appendChild(div);
+        chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    async function sendChat() {
+        const msg = chatInput.value.trim();
+        if (!msg) return;
+        chatInput.value = '';
+        appendMsg('user', msg);
+
+        const thinking = document.createElement('div');
+        thinking.className = 'ai-msg ai-msg-assistant ai-thinking';
+        thinking.textContent = '…';
+        chatLog.appendChild(thinking);
+
+        chatHistory.push({ role: 'user', content: msg });
+
+        try {
+            const systemPrompt = `You are a writing assistant embedded in a fiction writing app. You have full access to the author's story context below. Be direct and concise. When asked about the story, use the context provided. When asked to help with writing, respect the active Methods.\n\n${buildStoryContext()}\n\n## CURRENT CHAPTER TEXT:\n${getPlainText()}`;
+
+            const res = await fetch('https://api.anthropic.com/v1/messages', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: 'claude-sonnet-4-20250514',
+                    max_tokens: 1000,
+                    system: systemPrompt,
+                    messages: chatHistory
+                })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error.message);
+            const reply = data.content.map(b => b.text || '').join('');
+            chatHistory.push({ role: 'assistant', content: reply });
+            thinking.remove();
+            appendMsg('assistant', reply);
+        } catch (e) {
+            thinking.remove();
+            appendMsg('assistant', 'Error: ' + e.message);
+        }
+    }
+
+    chatSend.addEventListener('click', sendChat);
+    chatInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+    });
+
+    // ── CHECK SCENE ──────────────────────────────────────
+    const sceneResult = document.getElementById('ai-scene-result');
+    document.getElementById('ai-check-scene-btn').addEventListener('click', async () => {
+        const scene = getCurrentScene();
+        if (!scene) { sceneResult.textContent = 'No text found.'; return; }
+
+        const checks = [];
+        if (document.getElementById('sc-rhythm').checked) checks.push('Rhythm (sentence flow, pacing, variety)');
+        if (document.getElementById('sc-clarity').checked) checks.push('Clarity (ambiguous phrases, confusing sentences)');
+        if (document.getElementById('sc-grammar').checked) checks.push('Grammar & spelling');
+        if (document.getElementById('sc-methods').checked) checks.push('Methods compliance (check if scene follows the active writing rules)');
+
+        if (checks.length === 0) { sceneResult.textContent = 'Select at least one check.'; return; }
+
+        sceneResult.innerHTML = '<div class="ai-thinking">Analyzing scene…</div>';
+
+        const activeMethods = S.aic.filter(r => r.on).map(r => r.text).join('\n');
+
+        const systemPrompt = `You are a fiction writing editor. Be specific and concise. Point out only real issues — don't praise what works. Format your response with clear sections for each check type requested. Use short labels like [RHYTHM], [CLARITY], [GRAMMAR], [METHODS]. For each issue, quote the problematic text briefly and explain why.\n\nActive writing Methods the author follows:\n${activeMethods || 'None.'}`;
+
+        const userMessage = `Check this scene for: ${checks.join(', ')}.\n\nSCENE:\n${scene}`;
+
+        try {
+            const reply = await callClaude(systemPrompt, userMessage);
+            sceneResult.innerHTML = '';
+            // Render sections
+            reply.split('\n').forEach(line => {
+                const div = document.createElement('div');
+                if (/^\[(RHYTHM|CLARITY|GRAMMAR|METHODS)\]/.test(line)) {
+                    div.className = 'ai-scene-label';
+                } else {
+                    div.className = 'ai-scene-line';
+                }
+                div.textContent = line;
+                sceneResult.appendChild(div);
+            });
+        } catch (e) {
+            sceneResult.textContent = 'Error: ' + e.message;
+        }
+    });
+})();
 
 // ═══════════════════════════
 // BOOT
