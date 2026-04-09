@@ -451,13 +451,6 @@ wa.addEventListener('paste', e => {
     document.execCommand('insertText', false, text);
 });
 
-// ═══════════════════════════
-// GRAMMAR CHECK (Sapling AI)
-// Replace YOUR_SAPLING_API_KEY with a free key from https://sapling.ai/user/settings
-// Free tier: 50,000 characters/day, no credit card needed
-// ═══════════════════════════
-const SAPLING_API_KEY = 'Ha5zJ6BUu9K9zMlaTux4mNZIXJzoIPlRczq50oQ2KELo6yQvi7_LuDLf1ED1KaeitKqcV0XLNH5XyuZG5dSPyA==';
-
 let grammarT = null;
 let grammarMarks = [];    // [{from, to, message, replacements}]
 let activePopover = null;
@@ -476,26 +469,23 @@ async function runGrammarCheck() {
 
     grammarInFlight = true;
     try {
-        const res = await fetch('https://api.sapling.ai/api/v1/edits', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                key: SAPLING_API_KEY,
-                text,
-                session_id: 'fw3-editor',
-                neural_spellcheck: true
-            })
-        });
-        if (!res.ok) return;
-        const data = await res.json();
-        // Sapling returns: { edits: [{start, end, replacement, error_type, ...}] }
-        const matches = (data.edits || []).map(e => ({
-            offset: e.start,
-            length: e.end - e.start,
-            message: e.error_type || 'Suggestion',
-            replacements: e.replacement ? [e.replacement] : []
-        })).filter(m => m.replacements.length > 0);
-        applyGrammarMarks(text, matches);
+       const res = await fetch('https://api.languagetool.org/v2/check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+        text,
+        language: 'en-US'
+    })
+});
+if (!res.ok) return;
+const data = await res.json();
+const matches = (data.matches || []).map(m => ({
+    offset: m.offset,
+    length: m.length,
+    message: m.message || 'Suggestion',
+    replacements: (m.replacements || []).map(r => r.value)
+})).filter(m => m.replacements.length > 0);
+applyGrammarMarks(text, matches);
     } catch (e) {
         // silently fail — no internet, rate limit, etc.
     } finally {
