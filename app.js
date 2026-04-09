@@ -452,32 +452,72 @@ wa.addEventListener('paste', e => {
 });
 
 // ═══════════════════════════
-// GRAMMAR CHECK (LanguageTool)
+// GRAMMAR CHECK (Claude API)
 // ═══════════════════════════
 let grammarT = null;
 let grammarMarks = [];    // [{from, to, message, replacements}]
 let activePopover = null;
+let grammarInFlight = false;
+let grammarPending = false;
 
 function scheduleGrammarCheck() {
     clearTimeout(grammarT);
-    grammarT = setTimeout(runGrammarCheck, 1600);
+    grammarT = setTimeout(runGrammarCheck, 900);
 }
 
 async function runGrammarCheck() {
-    // Use getPlainText() directly — do NOT trim, trimming shifts API offsets.
+    if (grammarInFlight) { grammarPending = true; return; }
     const text = getPlainText();
     if (!text.trim() || text.trim().length < 10) { clearGrammarMarks(); return; }
+
+    grammarInFlight = true;
     try {
-        const res = await fetch('https://api.languagetool.org/v2/check', {
+        const prompt = `You are a grammar and spelling checker. Analyze the following text and return ONLY a JSON array of errors. Each error object must have:
+- "offset": character index where the error starts (0-based)
+- "length": number of characters the error spans
+- "message": short human-readable description of the error
+- "replacements": array of up to 3 suggested corrections (strings)
+
+Only flag real spelling mistakes and clear grammatical errors. Do NOT flag style, punctuation preferences, or creative writing choices. If there are no errors, return an empty array [].
+
+Return ONLY valid JSON. No explanation, no markdown, no backticks.
+
+Text to check:
+${text}`;
+
+        const res = await fetch('https://api.anthropic.com/v1/messages', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({ text, language: 'en-US', disabledCategories: 'TYPOGRAPHY' })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                model: 'claude-sonnet-4-20250514',
+                max_tokens: 1000,
+                messages: [{ role: 'user', content: prompt }]
+            })
         });
         if (!res.ok) return;
         const data = await res.json();
-        applyGrammarMarks(text, data.matches || []);
+        const raw = (data.content || []).map(b => b.text || '').join('').trim();
+        // Strip accidental markdown fences
+        const clean = raw.replace(/^```(?:json)?|```$/g, '').trim();
+        let matches = [];
+        try { matches = JSON.parse(clean); } catch (e) { matches = []; }
+        if (!Array.isArray(matches)) matches = [];
+        // Normalize to same shape as before
+        const normalized = matches.map(m => ({
+            offset: m.offset,
+            length: m.length,
+            message: m.message || '',
+            replacements: (m.replacements || []).map(r => typeof r === 'string' ? r : r.value || '')
+        }));
+        applyGrammarMarks(text, normalized);
     } catch (e) {
-        // silently fail — no internet, rate limit, etc.
+        // silently fail
+    } finally {
+        grammarInFlight = false;
+        if (grammarPending) {
+            grammarPending = false;
+            scheduleGrammarCheck();
+        }
     }
 }
 
