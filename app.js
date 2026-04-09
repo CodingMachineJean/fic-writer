@@ -311,13 +311,49 @@ document.addEventListener('keydown', e => {
 });
 
 // ── Plain text helpers ────────────────────────────────────
-// innerText is the canonical source of truth for text + newlines.
-// It matches exactly what LanguageTool receives, so API offsets
-// map 1-to-1 onto the DOM — no manual walk needed.
+// Single canonical DOM→text walk used by BOTH getPlainText() and
+// wrapRangeWithSpan(). Because both use identical logic, API offsets
+// are always consistent with DOM positions — no innerText quirks.
+//
+// Rules (mirror Chrome contenteditable behaviour):
+//   • text node  → its textContent verbatim
+//   • <br>       → "\n"
+//   • block open → prepend "\n" if something came before it
+//     (DIV, P, LI, BLOCKQUOTE — but NOT the root #write-area itself)
+function domWalk(rootNode, visitor) {
+    // visitor(type, node|null, extra)
+    //   type "text"  → node = TextNode
+    //   type "nl"    → synthetic newline from block / BR
+    let hasContent = false;
+
+    function walk(node) {
+        if (node.nodeType === Node.TEXT_NODE) {
+            if (node.textContent.length > 0) {
+                visitor('text', node);
+                hasContent = true;
+            }
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+            const tag = node.tagName;
+            if (tag === 'BR') {
+                visitor('nl', node);
+                hasContent = true;
+                return;
+            }
+            const isBlock = node !== rootNode && /^(DIV|P|LI|BLOCKQUOTE)$/.test(tag);
+            if (isBlock && hasContent) visitor('nl', node);
+            for (const c of node.childNodes) walk(c);
+        }
+    }
+    walk(rootNode);
+}
+
 function getPlainText() {
-    const t = wa.innerText;
-    // contenteditable often appends a trailing \n — strip it.
-    return t.replace(/\n$/, '');
+    let result = '';
+    domWalk(wa, (type, node) => {
+        if (type === 'text') result += node.textContent;
+        else result += '\n';
+    });
+    return result;
 }
 
 // Save/restore caret by character offset within plain text
@@ -428,10 +464,9 @@ function scheduleGrammarCheck() {
 }
 
 async function runGrammarCheck() {
-    // Do NOT trim — trimming shifts all API offsets, breaking mark placement.
+    // Use getPlainText() directly — do NOT trim, trimming shifts API offsets.
     const text = getPlainText();
-    const trimmed = text.trim();
-    if (!trimmed || trimmed.length < 10) { clearGrammarMarks(); return; }
+    if (!text.trim() || text.trim().length < 10) { clearGrammarMarks(); return; }
     try {
         const res = await fetch('https://api.languagetool.org/v2/check', {
             method: 'POST',
@@ -461,9 +496,8 @@ function clearGrammarMarks() {
 
 function applyGrammarMarks(plainText, matches) {
     // Re-check that text hasn't changed since the async call.
-    // Normalize both to avoid trailing-newline false mismatches.
-    const current = getPlainText().trim().replace(/\r/g, '');
-    if (current !== plainText.trim().replace(/\r/g, '')) return;
+    // Compare using getPlainText() — same function that built plainText.
+    if (getPlainText() !== plainText) return;
 
     clearGrammarMarks();
     if (matches.length === 0) return;
@@ -492,28 +526,22 @@ function applyGrammarMarks(plainText, matches) {
 }
 
 // Wrap character range [from, to) in the editor with a <span class="gr-err">
-// Offsets must match innerText (blocks = \n, BR = \n).
+// Uses domWalk — same as getPlainText — so offsets are guaranteed to match.
 function wrapRangeWithSpan(from, to, data) {
-    // Build a flat list of {node, start, end} where start/end are
-    // innerText-compatible character positions (counting \n for blocks).
-    const segments = [];
+    // Build segments: each text node mapped to its [start, end) char range.
+    // Synthetic newlines (from blocks/BR) advance pos but have no DOM node.
+    const segments = [];  // { node: TextNode, start, end }
     let pos = 0;
 
-    function walk(node) {
-        if (node.nodeType === Node.TEXT_NODE) {
+    domWalk(wa, (type, node) => {
+        if (type === 'text') {
             const len = node.textContent.length;
             segments.push({ node, start: pos, end: pos + len });
             pos += len;
-        } else if (node.nodeType === Node.ELEMENT_NODE) {
-            const tag = node.tagName;
-            if (tag === 'BR') { pos += 1; return; }
-            const isBlock = /^(DIV|P|LI|BLOCKQUOTE)$/.test(tag);
-            // innerText inserts \n BEFORE block content (except first child)
-            if (isBlock && node !== wa && node.previousSibling) pos += 1;
-            for (const c of node.childNodes) walk(c);
+        } else {
+            pos += 1;  // synthetic \n
         }
-    }
-    walk(wa);
+    });
 
     let startNode = null, startOff = 0, endNode = null, endOff = 0;
 
@@ -531,8 +559,7 @@ function wrapRangeWithSpan(from, to, data) {
 
     if (!startNode || !endNode) return;
 
-    // If the match spans across block boundaries, only mark within
-    // the start node's block to avoid surroundContents exceptions.
+    // If the match spans a block boundary, clip to the start node's block end.
     if (startNode !== endNode) {
         endNode = startNode;
         endOff = startNode.textContent.length;
@@ -550,7 +577,7 @@ function wrapRangeWithSpan(from, to, data) {
         span.addEventListener('click', e => { e.stopPropagation(); openPopover(span, data); });
         range.surroundContents(span);
     } catch (e) {
-        // skip — range still crossed a boundary (nested spans etc.)
+        // skip — range crossed a nested element boundary
     }
 }
 
