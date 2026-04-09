@@ -1106,19 +1106,17 @@ function renderPromisesOverlay() {
     }
 
     async function callClaude(systemPrompt, userMessage) {
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
+        const res = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                model: 'claude-sonnet-4-20250514',
-                max_tokens: 1000,
                 system: systemPrompt,
                 messages: [{ role: 'user', content: userMessage }]
             })
         });
         const data = await res.json();
-        if (data.error) throw new Error(data.error.message);
-        return data.content.map(b => b.text || '').join('');
+        if (data.error) throw new Error(data.error);
+        return data.text;
     }
 
     // ── CHAT ─────────────────────────────────────────────
@@ -1151,19 +1149,17 @@ function renderPromisesOverlay() {
         try {
             const systemPrompt = `You are a writing assistant embedded in a fiction writing app. You have full access to the author's story context below. Be direct and concise. When asked about the story, use the context provided. When asked to help with writing, respect the active Methods.\n\n${buildStoryContext()}\n\n## CURRENT CHAPTER TEXT:\n${getPlainText()}`;
 
-            const res = await fetch('https://api.anthropic.com/v1/messages', {
+            const res = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    model: 'claude-sonnet-4-20250514',
-                    max_tokens: 1000,
                     system: systemPrompt,
                     messages: chatHistory
                 })
             });
             const data = await res.json();
-            if (data.error) throw new Error(data.error.message);
-            const reply = data.content.map(b => b.text || '').join('');
+            if (data.error) throw new Error(data.error);
+            const reply = data.text;
             chatHistory.push({ role: 'assistant', content: reply });
             thinking.remove();
             appendMsg('assistant', reply);
