@@ -451,49 +451,70 @@ wa.addEventListener('paste', e => {
     document.execCommand('insertText', false, text);
 });
 
+// ═══════════════════════════
+// GRAMMAR CHECK (Sapling AI)
+// Replace YOUR_SAPLING_API_KEY with a free key from https://sapling.ai/user/settings
+// Free tier: 50,000 characters/day, no credit card needed
+// ═══════════════════════════
+// ═══════════════════════════
+// SPELL CHECK (Typo.js — roda no browser, sem API)
+// ═══════════════════════════
+let typoDic = null;
+
+async function loadTypo() {
+    if (typoDic) return typoDic;
+    const base = '/dictionaries/en_US';
+    const [aff, dic] = await Promise.all([
+        fetch(base + '.aff').then(r => r.text()),
+        fetch(base + '.dic').then(r => r.text())
+    ]);
+    typoDic = new Typo('en_US', aff, dic);
+    return typoDic;
+}
+
+loadTypo().catch(e => console.error('Typo load error:', e));
+
 let grammarT = null;
-let grammarMarks = [];    // [{from, to, message, replacements}]
+let grammarMarks = [];
 let activePopover = null;
 let grammarInFlight = false;
 let grammarPending = false;
 
 function scheduleGrammarCheck() {
     clearTimeout(grammarT);
-    grammarT = setTimeout(runGrammarCheck, 1000);
+    grammarT = setTimeout(runGrammarCheck, 800);
 }
 
 async function runGrammarCheck() {
     if (grammarInFlight) { grammarPending = true; return; }
     const text = getPlainText();
-    if (!text.trim() || text.trim().length < 10) { clearGrammarMarks(); return; }
+    if (!text.trim() || text.trim().length < 2) { clearGrammarMarks(); return; }
 
     grammarInFlight = true;
     try {
-       const res = await fetch('https://api.languagetool.org/v2/check', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-        text,
-        language: 'en-US'
-    })
-});
-if (!res.ok) return;
-const data = await res.json();
-const matches = (data.matches || []).map(m => ({
-    offset: m.offset,
-    length: m.length,
-    message: m.message || 'Suggestion',
-    replacements: (m.replacements || []).map(r => r.value)
-})).filter(m => m.replacements.length > 0);
-applyGrammarMarks(text, matches);
-    } catch (e) {
-        // silently fail — no internet, rate limit, etc.
-    } finally {
-        grammarInFlight = false;
-        if (grammarPending) {
-            grammarPending = false;
-            scheduleGrammarCheck();
+        const dic = await loadTypo();
+        // tokeniza palavras com seus offsets
+        const matches = [];
+        const wordRe = /[a-zA-Z']+/g;
+        let m;
+        while ((m = wordRe.exec(text)) !== null) {
+            const word = m[0].replace(/^'+|'+$/g, ''); // remove aspas nas bordas
+            if (word.length < 2) continue;
+            if (!dic.check(word)) {
+                const suggestions = dic.suggest(word).slice(0, 5);
+                if (suggestions.length > 0) {
+                    matches.push({
+                        offset: m.index,
+                        length: m[0].length,
+                        message: 'Misspelled: ' + word,
+                        replacements: suggestions
+                    });
+                }
+            }
         }
+        applyGrammarMarks(text, matches);
+    } catch (e) {
+        console.error('SpellCheck error:', e);
     }
 }
 function clearGrammarMarks() {
