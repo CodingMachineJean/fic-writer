@@ -452,7 +452,7 @@ wa.addEventListener('paste', e => {
 });
 
 // ═══════════════════════════
-// GRAMMAR CHECK (Claude API)
+// GRAMMAR CHECK (LanguageTool)
 // ═══════════════════════════
 let grammarT = null;
 let grammarMarks = [];    // [{from, to, message, replacements}]
@@ -462,7 +462,7 @@ let grammarPending = false;
 
 function scheduleGrammarCheck() {
     clearTimeout(grammarT);
-    grammarT = setTimeout(runGrammarCheck, 900);
+    grammarT = setTimeout(runGrammarCheck, 1000);
 }
 
 async function runGrammarCheck() {
@@ -472,46 +472,35 @@ async function runGrammarCheck() {
 
     grammarInFlight = true;
     try {
-        const prompt = `You are a grammar and spelling checker. Analyze the following text and return ONLY a JSON array of errors. Each error object must have:
-- "offset": character index where the error starts (0-based)
-- "length": number of characters the error spans
-- "message": short human-readable description of the error
-- "replacements": array of up to 3 suggested corrections (strings)
-
-Only flag real spelling mistakes and clear grammatical errors. Do NOT flag style, punctuation preferences, or creative writing choices. If there are no errors, return an empty array [].
-
-Return ONLY valid JSON. No explanation, no markdown, no backticks.
-
-Text to check:
-${text}`;
-
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
+        const res = await fetch('https://api.languagetool.org/v2/check', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model: 'claude-sonnet-4-20250514',
-                max_tokens: 1000,
-                messages: [{ role: 'user', content: prompt }]
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                text,
+                language: 'en-US',
+                disabledCategories: 'TYPOGRAPHY',
+                disabledRules: 'WHITESPACE_RULE,EN_UNPAIRED_BRACKETS',
+                enabledOnly: 'false',
+                level: 'default'
             })
         });
         if (!res.ok) return;
         const data = await res.json();
-        const raw = (data.content || []).map(b => b.text || '').join('').trim();
-        // Strip accidental markdown fences
-        const clean = raw.replace(/^```(?:json)?|```$/g, '').trim();
-        let matches = [];
-        try { matches = JSON.parse(clean); } catch (e) { matches = []; }
-        if (!Array.isArray(matches)) matches = [];
-        // Normalize to same shape as before
-        const normalized = matches.map(m => ({
-            offset: m.offset,
-            length: m.length,
-            message: m.message || '',
-            replacements: (m.replacements || []).map(r => typeof r === 'string' ? r : r.value || '')
-        }));
-        applyGrammarMarks(text, normalized);
+        // Filter out low-confidence matches: keep only SPELLING and clear grammar errors
+        const filtered = (data.matches || []).filter(m => {
+            const cat = (m.rule && m.rule.category && m.rule.category.id) || '';
+            // Always keep spelling errors
+            if (cat === 'TYPOS' || cat === 'SPELLING') return true;
+            // Keep grammar errors that have at least one replacement
+            if (cat === 'GRAMMAR' && m.replacements && m.replacements.length > 0) return true;
+            // Drop style, punctuation, misc low-confidence
+            if (['STYLE', 'PUNCTUATION', 'TYPOGRAPHY', 'MISC', 'CASING'].includes(cat)) return false;
+            // Keep anything else that has a clear replacement
+            return m.replacements && m.replacements.length > 0;
+        });
+        applyGrammarMarks(text, filtered);
     } catch (e) {
-        // silently fail
+        // silently fail — no internet, rate limit, etc.
     } finally {
         grammarInFlight = false;
         if (grammarPending) {
